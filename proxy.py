@@ -2,55 +2,53 @@
 # -*- coding: utf-8 -*-
 
 """
-基于Tornado实现的HTTP代理
-浏览器设置代理为8080即可
+ProxyHandler is a http proxy based on Tornado. The default port is 8080.
+Run this command to run the proxy:
+    python proxy --port=8080
+Use the `port` option to change the proxy's port.
 """
 
-import copy
-import time
+import sys
 import socket
-import subprocess
 
 import tornado.httpclient
 import tornado.httpserver
 import tornado.ioloop
-import tornado.options
 import tornado.web
-import tornado.escape as escape
 
+from models import *
 from urlparse import urlparse
-from tornado.options import define, options
+from sqlirunner import SqliRunner
 
-define("port", default=8080, help="run on the given port", type=int)
+domain = ""
+urls_pool = set()
+blacklist = []
 
 class ProxyHandler(tornado.web.RequestHandler):
     '''
-    HTTP代理实现类
+    A http proxy based on RequestHandler
     '''
     def render_request(self, url, callback=None, **kwargs):
         '''
-        使用AsyncHTTPClient异步客户端发送http请求
+        Use `AsyncHTTPClient` send http request
         '''
         req = tornado.httpclient.HTTPRequest(url, **kwargs)
         asy_client = tornado.httpclient.AsyncHTTPClient()
         asy_client.fetch(req, callback)
 
-    # 设置tornado支持connect方法
+    # Set supported methods for proxy
     SUPPORTED_METHODS = ("GET", "HEAD", "POST", "DELETE", "PATCH", "PUT",
                          "OPTIONS", "CONNECT")
     @tornado.web.asynchronous
     def get(self):
-        # 获取请求体
+        # get request body
         body = self.request.body
         if not body:
             body = None
         try:
-            # 代理发送请求
-            # 设置超时时间为12E4防止poll2的访问超时
-            # 导致重复登录问题
+            # send request by proxy
             timeout = 5
-            if "poll2" in self.request.uri:
-                timeout = 12E4
+            # proxy sends the request
             self.render_request(
                     self.request.uri, 
                     callback=self.on_response,
@@ -67,29 +65,64 @@ class ProxyHandler(tornado.web.RequestHandler):
                 self.set_status(500)
                 self.write('Internal server error:\n' + str(httperror))
                 self.finish()
-    
+
     def on_response(self, response):
         '''
-        异步HTTP请求的回调函数
+        http requst callback
         '''
-        # 处理异常情况
+        global domain, urls_pool, blacklist
+        # handle exceptions
         if response.error and type(response.error) != tornado.httpclient.HTTPError:
             self.set_status(500)
             self.write('Internal server error:\n' + str(response.error))
             self.finish()
         else:
-            # 处理正常情况
+            # run the sqlmap
+            # only detect few content type:
+            # text/html, application/json
+            url = response.request.url
+            method = response.request.method
+            urlp = urlparse(url)
+            host_path = "%s://%s/%s" % (urlp.scheme, urlp.netloc, urlp.path)
+            content_type = response.headers.get_list('content-type')
+            if len(content_type) > 0:
+                content_type = content_type[0]
+            # default domain is null
+            if not domain:
+                if (method == 'GET' and urlp.query) or \
+                    (method == 'POST' and response.body):
+                    if ("text/html" in content_type) or \
+                        ("application/json" in content_type):
+                        if (host_path not in urls_pool) and  \
+                            (urlp.netloc not in blacklist) and \
+                            (response.code == 200):
+                            urls_pool.add(host_path)
+                            sqli_runner = SqliRunner(response.request)
+                            sqli_runner.run()
+            # only detect the POST method and the GET 
+            # method with query string in url
+            elif (method == 'GET' and urlp.query) or \
+                (method == 'POST' and response.body):
+                if urlp.netloc.endswith(domain) and (host_path not in urls_pool) \
+                    and response.code == 200 and (urlp.netloc not in blacklist):
+                        if ("text/html" in content_type) or \
+                            ("application/json" in content_type):
+                            urls_pool.add(host_path)
+                            sqli_runner = SqliRunner(response.request)
+                            sqli_runner.run()
+
             try:
                 self.set_status(response.code)
             except ValueError, e:
-                print '[ValueError]:%s' % str(e)
-            # 设置RequestHandler中的self._headers属性
+                pass
+                # print '[ValueError]:%s' % str(e)
+            # Set `self._headers` attribute for RequestHandler
             headers = self._headers.keys()
             for header in headers:
                 value = response.headers.get(header)
                 if value:
                     self.set_header(header, value)
-            # 设置set-cookie头
+            # set the `set-cookie` header
             cookies = response.headers.get_list('Set-Cookie')
             if cookies:
                 for i in cookies:
@@ -98,7 +131,8 @@ class ProxyHandler(tornado.web.RequestHandler):
                 if response.code != 304:
                     self.write(response.body)
             except TypeError, e:
-                print '[TypeError]:%s' % str(e)
+                pass
+                # print '[TypeError]:%s' % str(e)
             self.finish()
 
     @tornado.web.asynchronous
@@ -107,14 +141,10 @@ class ProxyHandler(tornado.web.RequestHandler):
 
     @tornado.web.asynchronous
     def connect(self):
-        '''
-        对于HTTPS连接，代理应当作为TCP中继
-        '''
-        print 'Starting Conntect to %s' % self.request.uri
         # 获取request的socket
         req_stream = self.request.connection.stream
 
-        # 找到主机端口，一般为443
+        # get port
         host, port = self.request.uri.split(':')
         port = int(port)
 
@@ -139,10 +169,6 @@ class ProxyHandler(tornado.web.RequestHandler):
             req_stream.write(data)
 
         def on_connect():
-            '''
-            创建TCP中继的回调
-            '''
-            print 'CONNECT tunnel established to %s' % self.request.uri
             req_stream.read_until_close(req_close, write_to_server)
             conn_stream.read_until_close(proxy_close, write_to_client)
             req_stream.write(b'HTTP/1.0 200 Connection established\r\n\r\n')
@@ -153,11 +179,18 @@ class ProxyHandler(tornado.web.RequestHandler):
         conn_stream.connect((host, port), on_connect)
 
 if __name__ == '__main__':
-    tornado.options.parse_command_line()
-    print "Starting Proxy on port %s" % options.port
+    create_tables()
+    with open('blacklist.txt', 'r') as f:
+        blacklist = f.readlines()
+    blacklist = [i.replace("\n", "") for i in blacklist]
+    port = 8080
+    if len(sys.argv) == 3:
+        port = int(sys.argv[1])
+        domain = sys.argv[2]
+    print "Starting Proxy on port %s, domain %s" % (port, domain)
     handlers = [
         (r'.*', ProxyHandler),
     ]
     app = tornado.web.Application(handlers=handlers)
-    app.listen(options.port)
+    app.listen(port)
     tornado.ioloop.IOLoop.instance().start()

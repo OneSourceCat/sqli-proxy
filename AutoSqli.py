@@ -1,19 +1,15 @@
-#!/usr/bin/python
-#-*-coding:utf-8-*-
+# -*-coding:utf-8-*-
 import requests
 import time
 import json
 
+from threading import Thread
+from models import *
 
-class AutoSqli(object):
-
-    """
-    使用sqlmapapi的方法进行与sqlmapapi建立的server进行交互
-    By Manning
-    """
-
-    def __init__(self, server='', target='',data = '',referer = '',cookie = ''):
-        super(AutoSqli, self).__init__()
+class AutoSqli(Thread):
+    def __init__(self, server='', target='', 
+        data='', referer='', cookie='', req_text=''):
+        Thread.__init__(self)
         self.server = server
         if self.server[-1] != '/':
             self.server = self.server + '/'
@@ -24,12 +20,13 @@ class AutoSqli(object):
         self.data = data
         self.referer = referer
         self.cookie = cookie
+        self.req_text = req_text
         self.start_time = time.time()
 
     def task_new(self):
         self.taskid = json.loads(
             requests.get(self.server + 'task/new').text)['taskid']
-        print 'Created new task: ' + self.taskid
+        print 'Created new task: ' + self.taskid + "\t" + self.target
         if len(self.taskid) > 0:
             return True
         return False
@@ -42,13 +39,16 @@ class AutoSqli(object):
 
     def scan_start(self):
         headers = {'Content-Type': 'application/json'}
-        payload = {'url': self.target}
+        payload = {
+            'url': self.target,
+            'data': self.data,
+            'cookie': self.cookie,
+            'referer': self.referer}
         url = self.server + 'scan/' + self.taskid + '/start'
         t = json.loads(
             requests.post(url, data=json.dumps(payload), headers=headers).text)
         self.engineid = t['engineid']
         if len(str(self.engineid)) > 0 and t['success']:
-            print 'Started scan'
             return True
         return False
 
@@ -66,9 +66,10 @@ class AutoSqli(object):
         self.data = json.loads(
             requests.get(self.server + 'scan/' + self.taskid + '/data').text)['data']
         if len(self.data) == 0:
-            print 'not injection:\t'
+            print 'not injection:\t' + self.target
         else:
-            print 'injection:\t' + self.target
+            print '=======> injection:\t' + self.target
+            SQLIRecords.insert(url=self.target, request_text=self.req_text).execute()
 
     def option_set(self):
         headers = {'Content-Type': 'application/json'}
@@ -79,7 +80,6 @@ class AutoSqli(object):
         url = self.server + 'option/' + self.taskid + '/set'
         t = json.loads(
             requests.post(url, data=json.dumps(option), headers=headers).text)
-        print t
 
     def scan_stop(self):
         json.loads(
@@ -89,29 +89,36 @@ class AutoSqli(object):
         json.loads(
             requests.get(self.server + 'scan/' + self.taskid + '/kill').text)['success']
 
-    def run(self):
-        if not self.task_new():
-            return False
-        self.option_set()
-        if not self.scan_start():
-            return False
-        while True:
-            if self.scan_status() == 'running':
-                time.sleep(10)
-            elif self.scan_status() == 'terminated':
-                break
-            else:
-                break
-            print time.time() - self.start_time
-            if time.time() - self.start_time > 3000:
-                error = True
-                self.scan_stop()
-                self.scan_kill()
-                break
-        self.scan_data()
-        self.task_delete()
-        print time.time() - self.start_time
+    def write_to_db(self):
+        pass
 
-if __name__ == '__main__':
-    t = AutoSqli('http://127.0.0.1:8775', 'http://www.zxssyxx.com/read.asp?id=2471')
-    t.run()
+    def run(self):
+        try:
+            if not self.task_new():
+                return False
+            self.option_set()
+            if not self.scan_start():
+                return False
+            while True:
+                if self.scan_status() == 'running':
+                    time.sleep(10)
+                elif self.scan_status() == 'terminated':
+                    break
+                else:
+                    break
+                print self.target + ":\t" + str(time.time() - self.start_time)
+                if time.time() - self.start_time > 500:
+                    error = True
+                    self.scan_stop()
+                    self.scan_kill()
+                    break
+            self.scan_data()
+            self.task_delete()
+            print self.target + ":\t" + str(time.time() - self.start_time)
+        except Exception, e:
+            print e
+        
+
+# if __name__ == '__main__':
+#     t = AutoSqli('http://127.0.0.1:8775', 'http://www.zxssyxx.com/read.asp?id=2471')
+#     t.run()
