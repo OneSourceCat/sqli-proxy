@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import logging
-
 # sqlmapapi server config
 SERVER = 'http://127.0.0.1:8775'
 
