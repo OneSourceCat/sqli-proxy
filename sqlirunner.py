@@ -1,7 +1,7 @@
 # coding=utf-8
 
 from config import SERVER
-from autosqli import AutoSqli
+from AutoSqli import AutoSqli
 from urlparse import urlparse
 
 class SqliRunner(object):
